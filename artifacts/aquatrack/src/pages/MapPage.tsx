@@ -2,9 +2,11 @@ import { useEffect, useState, useCallback } from 'react';
 import { MapView } from '@/components/Map/MapView';
 import { apiService } from '@/services/api';
 import { useWebSocket } from '@/hooks/useWebSocket';
+import { useAuth } from '@/contexts/AuthContext';
 import type { DeviceWithLocation } from '@/types';
 
 export function MapPage() {
+  const { user } = useAuth();
   const [devices, setDevices] = useState<DeviceWithLocation[]>([]);
   const [isRefreshing, setIsRefreshing] = useState(false);
 
@@ -27,6 +29,7 @@ export function MapPage() {
   }, [fetchData]);
 
   useWebSocket({
+    userId: user?.id,
     onSensorData: (data) => {
       setDevices((prev) => {
         const index = prev.findIndex((d) => d.deviceId === data.device.deviceId);

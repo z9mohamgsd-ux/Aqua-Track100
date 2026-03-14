@@ -9,6 +9,7 @@ import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Cpu, Wifi, RefreshCw, AlertTriangle, LayoutGrid, MonitorCheck } from 'lucide-react';
 import { useWebSocket } from '@/hooks/useWebSocket';
+import { useAuth } from '@/contexts/AuthContext';
 import { apiService } from '@/services/api';
 import type { DeviceWithLocation, SensorReading, Alert, SensorStatus } from '@/types';
 
@@ -42,6 +43,7 @@ function getValueStatus(value: number, min: number, max: number): SensorStatus {
 }
 
 export function Dashboard() {
+  const { user } = useAuth();
   const [devices, setDevices] = useState<DeviceWithLocation[]>([]);
   const [readings, setReadings] = useState<SensorReading[]>([]);
   const [alerts, setAlerts] = useState<Alert[]>([]);
@@ -133,6 +135,7 @@ export function Dashboard() {
   }, []);
 
   const { connectionStatus } = useWebSocket({
+    userId: user?.id,
     onSensorData: handleSensorData,
     onAlert: handleAlert,
     onAlertResolved: handleAlertResolved,

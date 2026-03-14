@@ -2,9 +2,11 @@ import { useEffect, useState, useCallback } from 'react';
 import { DeviceList } from '@/components/Devices/DeviceList';
 import { apiService } from '@/services/api';
 import { useWebSocket } from '@/hooks/useWebSocket';
+import { useAuth } from '@/contexts/AuthContext';
 import type { DeviceWithLocation } from '@/types';
 
 export function DevicesPage() {
+  const { user } = useAuth();
   const [devices, setDevices] = useState<DeviceWithLocation[]>([]);
   const [isRefreshing, setIsRefreshing] = useState(false);
 
@@ -37,6 +39,7 @@ export function DevicesPage() {
   }, []);
 
   useWebSocket({
+    userId: user?.id,
     onSensorData: (data) => {
       setDevices((prev) => {
         const index = prev.findIndex((d) => d.deviceId === data.device.deviceId);

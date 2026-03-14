@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import { apiService } from '@/services/api';
 import { useWebSocket } from '@/hooks/useWebSocket';
+import { useAuth } from '@/contexts/AuthContext';
 import type { Alert as AlertType } from '@/types';
 import { formatDistanceToNow } from 'date-fns';
 
@@ -47,6 +48,7 @@ const severityConfig = {
 };
 
 export function AlertsPage() {
+  const { user } = useAuth();
   const [alerts, setAlerts] = useState<AlertType[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [filter, setFilter] = useState<'all' | 'critical' | 'warning' | 'info'>('all');
@@ -70,6 +72,7 @@ export function AlertsPage() {
   }, [fetchAlerts]);
 
   useWebSocket({
+    userId: user?.id,
     onAlert: (alert) => {
       setAlerts((prev) => {
         if (prev.find((a) => a.id === alert.id)) return prev;

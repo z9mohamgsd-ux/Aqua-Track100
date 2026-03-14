@@ -1,0 +1,62 @@
+Set up a Supabase PostgreSQL schema for AquaTrack with full support for IoT sensor data, user accounts, ticketing, and alerts. 
+The schema must include:
+
+1. users
+   - id (UUID, primary key, default gen_random_uuid())
+   - email (unique, required)
+   - password_hash (text, required)
+   - role (enum: 'user', 'admin', 'owner')
+   - created_at (timestamp with time zone, default now())
+
+2. devices
+   - id (UUID, primary key)
+   - deviceId (text, unique, required)
+   - name (text)
+   - api_secret (UUID, required, used for authentication)
+   - owner_id (UUID, foreign key → users.id)
+   - created_at (timestamp with time zone)
+
+3. sensor_readings
+   - id (UUID, primary key)
+   - device_id (UUID, foreign key → devices.id)
+   - ph (numeric, check between 0 and 14)
+   - temperature (numeric, check between -50 and 100)
+   - turbidity (numeric, check ≥ 0)
+   - conductivity (numeric, check ≥ 0)
+   - latitude (float8)
+   - longitude (float8)
+   - recorded_at (timestamp with time zone, default now())
+
+4. tickets
+   - id (UUID, primary key)
+   - user_id (UUID, foreign key → users.id)
+   - status (enum: 'open', 'pending', 'escalated', 'closed', 'archived')
+   - subject (text)
+   - created_at (timestamp with time zone)
+
+5. ticket_messages
+   - id (UUID, primary key)
+   - ticket_id (UUID, foreign key → tickets.id)
+   - sender_id (UUID, foreign key → users.id)
+   - message (text)
+   - created_at (timestamp with time zone)
+
+6. active_alerts
+   - id (UUID, primary key)
+   - device_id (UUID, foreign key → devices.id)
+   - rule_id (UUID, foreign key → alert_rules.id)
+   - triggered_at (timestamp with time zone)
+
+7. alert_rules
+   - id (UUID, primary key)
+   - user_id (UUID, foreign key → users.id)
+   - parameter (enum: 'ph', 'temperature', 'turbidity', 'conductivity')
+   - min_value (numeric, nullable)
+   - max_value (numeric, nullable)
+   - created_at (timestamp with time zone)
+
+Constraints:
+- Enforce foreign keys with ON DELETE CASCADE where appropriate.
+- Add indexes on deviceId, recorded_at, and user_id for fast queries.
+- Ensure sensor_readings values respect logical ranges via CHECK constraints.
+- Enable Row Level Security (RLS) so users can only query their own devices, readings, and tickets.

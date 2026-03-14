@@ -1,80 +1,185 @@
+const pool = require('../db');
 const validationService = require('../services/validationService');
 const socketService = require('../services/socketService');
 
-// In-memory data storage
-const registeredDevices = new Map(); // User-registered devices (name + id)
-const devices = new Map();           // Runtime device state (online/offline, readings)
-const sensorReadings = new Map();
-const alerts = new Map();
+// In-memory runtime state: track connection status & last seen without hammering DB
+const runtimeState = new Map(); // deviceId (text) -> { lastSeen, status }
 
 const DEVICE_TIMEOUT = parseInt(process.env.DEVICE_TIMEOUT) || 30000;
 const MAX_READINGS_PER_DEVICE = parseInt(process.env.MAX_READINGS_PER_DEVICE) || 1000;
 
 /**
+ * Resolve runtime status (connected / disconnected) for a device
+ */
+function getDeviceStatus(deviceId) {
+  const state = runtimeState.get(deviceId);
+  if (!state) return 'disconnected';
+  return (Date.now() - state.lastSeen) < DEVICE_TIMEOUT ? 'connected' : 'disconnected';
+}
+
+/**
  * Register a new device
- * POST /api/devices
+ * POST /api/devices  (requires auth)
  */
 const registerDevice = async (req, res) => {
   try {
     const { deviceId, name } = req.body;
+    const ownerId = req.user.id;
 
     if (!deviceId || !name) {
-      return res.status(400).json({
-        success: false,
-        message: 'Missing required fields: deviceId and name are required',
-      });
+      return res.status(400).json({ success: false, message: 'Missing required fields: deviceId and name' });
     }
 
-    if (registeredDevices.has(deviceId)) {
-      return res.status(409).json({
-        success: false,
-        message: `Device with id "${deviceId}" is already registered`,
-      });
+    // Check duplicate across all users (device_id is globally unique)
+    const existing = await pool.query('SELECT id, owner_id FROM devices WHERE device_id = $1', [deviceId]);
+    if (existing.rows.length) {
+      return res.status(409).json({ success: false, message: `Device "${deviceId}" is already registered` });
     }
 
-    const device = { deviceId, name, registeredAt: new Date() };
-    registeredDevices.set(deviceId, device);
+    const result = await pool.query(
+      `INSERT INTO devices (device_id, name, owner_id, registered_at)
+       VALUES ($1, $2, $3, NOW())
+       RETURNING id, device_id AS "deviceId", name, owner_id, registered_at`,
+      [deviceId, name, ownerId]
+    );
 
-    socketService.broadcast('device-registered', device);
+    const device = result.rows[0];
+    socketService.broadcastToUser(ownerId, 'device-registered', device);
 
-    res.status(201).json({
-      success: true,
-      message: 'Device registered successfully',
-      data: device,
-    });
+    return res.status(201).json({ success: true, message: 'Device registered successfully', data: device });
   } catch (error) {
     console.error('Error registering device:', error);
-    res.status(500).json({ success: false, message: 'Internal server error', error: error.message });
+    return res.status(500).json({ success: false, message: 'Internal server error', error: error.message });
   }
 };
 
 /**
  * Delete a registered device
- * DELETE /api/devices/:deviceId
+ * DELETE /api/devices/:deviceId  (requires auth, must own device)
  */
 const deleteDevice = async (req, res) => {
   try {
     const { deviceId } = req.params;
+    const ownerId = req.user.id;
 
-    if (!registeredDevices.has(deviceId)) {
+    const found = await pool.query(
+      'SELECT id FROM devices WHERE device_id = $1 AND owner_id = $2',
+      [deviceId, ownerId]
+    );
+    if (!found.rows.length) {
       return res.status(404).json({ success: false, message: `Device not found: ${deviceId}` });
     }
 
-    registeredDevices.delete(deviceId);
-    devices.delete(deviceId);
-    sensorReadings.delete(deviceId);
+    await pool.query('DELETE FROM devices WHERE device_id = $1 AND owner_id = $2', [deviceId, ownerId]);
+    runtimeState.delete(deviceId);
+    socketService.broadcastToUser(ownerId, 'device-deleted', { deviceId });
 
-    socketService.broadcast('device-deleted', { deviceId });
-
-    res.json({ success: true, message: 'Device deleted successfully' });
+    return res.json({ success: true, message: 'Device deleted successfully' });
   } catch (error) {
     console.error('Error deleting device:', error);
-    res.status(500).json({ success: false, message: 'Internal server error', error: error.message });
+    return res.status(500).json({ success: false, message: 'Internal server error', error: error.message });
   }
 };
 
 /**
- * Receive sensor data from Arduino/IoT devices
+ * Get all devices for the authenticated user
+ * GET /api/devices  (requires auth)
+ */
+const getAllDevices = async (req, res) => {
+  try {
+    const ownerId = req.user.id;
+
+    const result = await pool.query(
+      `SELECT id, device_id AS "deviceId", name, owner_id, registered_at,
+              last_seen, last_lat, last_lng,
+              last_ph, last_temperature, last_turbidity, last_conductivity
+       FROM devices WHERE owner_id = $1 ORDER BY registered_at DESC`,
+      [ownerId]
+    );
+
+    const deviceList = result.rows.map((d) => {
+      const status = getDeviceStatus(d.deviceId);
+      return {
+        deviceId: d.deviceId,
+        name: d.name,
+        status,
+        lastSeen: d.last_seen,
+        registeredAt: d.registered_at,
+        location: { latitude: d.last_lat, longitude: d.last_lng },
+        readings: (d.last_ph !== null)
+          ? {
+              ph: d.last_ph,
+              temperature: d.last_temperature,
+              turbidity: d.last_turbidity,
+              conductivity: d.last_conductivity,
+              timestamp: d.last_seen,
+            }
+          : null,
+      };
+    });
+
+    return res.json({ success: true, data: deviceList, count: deviceList.length, timestamp: new Date().toISOString() });
+  } catch (error) {
+    console.error('Error getting devices:', error);
+    return res.status(500).json({ success: false, message: 'Internal server error', error: error.message });
+  }
+};
+
+/**
+ * Get specific device details — must own it
+ * GET /api/devices/:deviceId  (requires auth)
+ */
+const getDeviceDetails = async (req, res) => {
+  try {
+    const { deviceId } = req.params;
+    const ownerId = req.user.id;
+
+    const result = await pool.query(
+      `SELECT id, device_id AS "deviceId", name, owner_id, registered_at,
+              last_seen, last_lat, last_lng,
+              last_ph, last_temperature, last_turbidity, last_conductivity
+       FROM devices WHERE device_id = $1 AND owner_id = $2`,
+      [deviceId, ownerId]
+    );
+
+    if (!result.rows.length) {
+      return res.status(404).json({ success: false, message: `Device not found: ${deviceId}` });
+    }
+
+    const d = result.rows[0];
+    const status = getDeviceStatus(d.deviceId);
+
+    return res.json({
+      success: true,
+      data: {
+        deviceId: d.deviceId,
+        name: d.name,
+        status,
+        lastSeen: d.last_seen,
+        latitude: d.last_lat,
+        longitude: d.last_lng,
+        latestReading: (d.last_ph !== null)
+          ? {
+              ph: d.last_ph,
+              temperature: d.last_temperature,
+              turbidity: d.last_turbidity,
+              conductivity: d.last_conductivity,
+              timestamp: d.last_seen,
+            }
+          : null,
+        registeredAt: d.registered_at,
+      },
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error) {
+    console.error('Error getting device details:', error);
+    return res.status(500).json({ success: false, message: 'Internal server error', error: error.message });
+  }
+};
+
+/**
+ * Receive sensor data from Arduino/IoT devices — OPEN endpoint (no auth)
+ * The IoT device identifies itself by deviceId.  Must be pre-registered.
  * POST /api/sensor-data
  */
 const receiveSensorData = async (req, res) => {
@@ -85,7 +190,7 @@ const receiveSensorData = async (req, res) => {
         turbidity === undefined || conductivity === undefined) {
       return res.status(400).json({
         success: false,
-        message: 'Missing required fields. Required: deviceId, ph, temperature, turbidity, conductivity',
+        message: 'Missing required fields: deviceId, ph, temperature, turbidity, conductivity',
         timestamp: new Date().toISOString(),
       });
     }
@@ -98,337 +203,270 @@ const receiveSensorData = async (req, res) => {
     });
 
     if (!validation.isValid) {
-      return res.status(400).json({
-        success: false,
-        message: 'Validation failed',
-        errors: validation.errors,
-        timestamp: new Date().toISOString(),
-      });
+      return res.status(400).json({ success: false, message: 'Validation failed', errors: validation.errors, timestamp: new Date().toISOString() });
     }
 
-    const timestamp = new Date();
-    const registered = registeredDevices.get(deviceId);
+    // Find device in DB
+    const deviceResult = await pool.query(
+      'SELECT id, name, owner_id FROM devices WHERE device_id = $1',
+      [deviceId]
+    );
+    if (!deviceResult.rows.length) {
+      return res.status(404).json({ success: false, message: `Device not registered: ${deviceId}. Register first via the dashboard.`, timestamp: new Date().toISOString() });
+    }
 
-    const device = {
-      deviceId,
-      name: registered ? registered.name : deviceId,
-      lastSeen: timestamp,
-      latitude: latitude || null,
-      longitude: longitude || null,
-      status: 'connected',
-      latestReading: {
-        ph: parseFloat(ph),
-        temperature: parseFloat(temperature),
-        turbidity: parseFloat(turbidity),
-        conductivity: parseFloat(conductivity),
-        timestamp,
-      },
-    };
+    const dbDevice = deviceResult.rows[0];
+    const lat = latitude ?? null;
+    const lng = longitude ?? null;
+    const now = new Date();
 
-    devices.set(deviceId, device);
+    // Persist reading
+    const readingResult = await pool.query(
+      `INSERT INTO sensor_readings (device_id, ph, temperature, turbidity, conductivity, latitude, longitude, recorded_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       RETURNING id, recorded_at`,
+      [dbDevice.id, parseFloat(ph), parseFloat(temperature), parseFloat(turbidity), parseFloat(conductivity), lat, lng, now]
+    );
 
-    // Attach the frontend-expected shape for the socket broadcast
-    const broadcastDevice = {
-      ...device,
-      location: { latitude: device.latitude, longitude: device.longitude },
-      readings: device.latestReading || null,
-    };
+    // Update device last-seen snapshot
+    await pool.query(
+      `UPDATE devices SET last_seen = $1, last_lat = $2, last_lng = $3,
+          last_ph = $4, last_temperature = $5, last_turbidity = $6, last_conductivity = $7, status = 'connected'
+       WHERE id = $8`,
+      [now, lat, lng, parseFloat(ph), parseFloat(temperature), parseFloat(turbidity), parseFloat(conductivity), dbDevice.id]
+    );
+
+    // Trim old readings (keep latest MAX_READINGS_PER_DEVICE)
+    pool.query(
+      `DELETE FROM sensor_readings WHERE device_id = $1 AND id NOT IN (
+         SELECT id FROM sensor_readings WHERE device_id = $1 ORDER BY recorded_at DESC LIMIT $2
+       )`,
+      [dbDevice.id, MAX_READINGS_PER_DEVICE]
+    ).catch(() => {});
+
+    // Update in-memory runtime state
+    runtimeState.set(deviceId, { lastSeen: Date.now(), status: 'connected' });
 
     const reading = {
-      id: `${deviceId}-${timestamp.getTime()}`,
+      id: readingResult.rows[0].id,
       deviceId,
       ph: parseFloat(ph),
       temperature: parseFloat(temperature),
       turbidity: parseFloat(turbidity),
       conductivity: parseFloat(conductivity),
-      timestamp,
-      latitude: latitude || null,
-      longitude: longitude || null,
+      timestamp: now,
+      latitude: lat,
+      longitude: lng,
     };
 
-    if (!sensorReadings.has(deviceId)) {
-      sensorReadings.set(deviceId, []);
-    }
+    const devicePayload = {
+      deviceId,
+      name: dbDevice.name,
+      status: 'connected',
+      lastSeen: now,
+      location: { latitude: lat, longitude: lng },
+      readings: reading,
+    };
 
-    const deviceReadings = sensorReadings.get(deviceId);
-    deviceReadings.push(reading);
+    const alerts_generated = await checkThresholds(dbDevice.id, deviceId, dbDevice.name, dbDevice.owner_id, reading);
 
-    if (deviceReadings.length > MAX_READINGS_PER_DEVICE) {
-      deviceReadings.shift();
-    }
+    // Broadcast only to device owner's socket room
+    socketService.broadcastToUser(dbDevice.owner_id, 'sensor-data', { device: devicePayload, reading, alerts: alerts_generated });
 
-    const alerts_generated = checkThresholds(deviceId, reading);
-
-    socketService.broadcast('sensor-data', {
-      device: broadcastDevice,
-      reading,
-      alerts: alerts_generated,
-    });
-
-    res.status(201).json({
+    return res.status(201).json({
       success: true,
       message: 'Sensor data received successfully',
-      data: {
-        deviceId,
-        timestamp,
-        alerts_generated: alerts_generated.length,
-      },
+      data: { deviceId, timestamp: now, alerts_generated: alerts_generated.length },
     });
   } catch (error) {
     console.error('Error processing sensor data:', error);
-    res.status(500).json({ success: false, message: 'Internal server error', error: error.message });
+    return res.status(500).json({ success: false, message: 'Internal server error', error: error.message });
   }
 };
 
 /**
- * Get latest sensor data from all registered devices
- * GET /api/sensor-data/latest
+ * Get latest readings for all of the authenticated user's devices
+ * GET /api/sensor-data/latest  (requires auth)
  */
 const getLatestData = async (req, res) => {
   try {
-    const latestData = [];
-    const now = new Date();
+    const ownerId = req.user.id;
 
-    for (const [deviceId, registered] of registeredDevices) {
-      const runtime = devices.get(deviceId);
-      const timeSinceLastSeen = runtime ? now - runtime.lastSeen : Infinity;
-      const isConnected = runtime && timeSinceLastSeen < DEVICE_TIMEOUT;
+    const result = await pool.query(
+      `SELECT device_id AS "deviceId", name, last_seen, last_lat, last_lng,
+              last_ph, last_temperature, last_turbidity, last_conductivity, registered_at
+       FROM devices WHERE owner_id = $1 ORDER BY registered_at DESC`,
+      [ownerId]
+    );
 
-      if (runtime && !isConnected && runtime.status === 'connected') {
-        runtime.status = 'disconnected';
-        devices.set(deviceId, runtime);
-      }
+    const latestData = result.rows.map((d) => ({
+      deviceId: d.deviceId,
+      name: d.name,
+      status: getDeviceStatus(d.deviceId),
+      lastSeen: d.last_seen,
+      location: { latitude: d.last_lat, longitude: d.last_lng },
+      readings: (d.last_ph !== null)
+        ? { ph: d.last_ph, temperature: d.last_temperature, turbidity: d.last_turbidity, conductivity: d.last_conductivity, timestamp: d.last_seen }
+        : null,
+    }));
 
-      latestData.push({
-        deviceId,
-        name: registered.name,
-        status: isConnected ? 'connected' : 'disconnected',
-        lastSeen: runtime ? runtime.lastSeen : null,
-        location: {
-          latitude: runtime ? runtime.latitude : null,
-          longitude: runtime ? runtime.longitude : null,
-        },
-        readings: runtime ? runtime.latestReading || null : null,
-      });
-    }
-
-    res.json({ success: true, data: latestData, timestamp: new Date().toISOString() });
+    return res.json({ success: true, data: latestData, timestamp: new Date().toISOString() });
   } catch (error) {
     console.error('Error getting latest data:', error);
-    res.status(500).json({ success: false, message: 'Internal server error', error: error.message });
+    return res.status(500).json({ success: false, message: 'Internal server error', error: error.message });
   }
 };
 
 /**
- * Get historical data for a specific device
- * GET /api/sensor-data/history/:deviceId
+ * Get historical readings for a specific device — must own it
+ * GET /api/sensor-data/history/:deviceId  (requires auth)
  */
 const getDeviceHistory = async (req, res) => {
   try {
     const { deviceId } = req.params;
     const { hours = 24, limit = 100 } = req.query;
+    const ownerId = req.user.id;
 
-    if (!sensorReadings.has(deviceId)) {
-      return res.status(404).json({ success: false, message: `No data found for device: ${deviceId}` });
+    const deviceRow = await pool.query(
+      'SELECT id FROM devices WHERE device_id = $1 AND owner_id = $2',
+      [deviceId, ownerId]
+    );
+    if (!deviceRow.rows.length) {
+      return res.status(404).json({ success: false, message: `Device not found or not yours: ${deviceId}` });
     }
 
-    const cutoffTime = new Date();
-    cutoffTime.setHours(cutoffTime.getHours() - parseInt(hours));
+    const dbDeviceId = deviceRow.rows[0].id;
+    const cutoff = new Date(Date.now() - parseInt(hours) * 3600 * 1000);
 
-    const allReadings = sensorReadings.get(deviceId);
-    const filteredReadings = allReadings
-      .filter((r) => r.timestamp >= cutoffTime)
-      .slice(-parseInt(limit));
+    const result = await pool.query(
+      `SELECT id, ph, temperature, turbidity, conductivity, latitude, longitude, recorded_at AS timestamp
+       FROM sensor_readings
+       WHERE device_id = $1 AND recorded_at >= $2
+       ORDER BY recorded_at DESC LIMIT $3`,
+      [dbDeviceId, cutoff, parseInt(limit)]
+    );
 
-    res.json({
-      success: true,
-      deviceId,
-      data: filteredReadings,
-      count: filteredReadings.length,
-      timestamp: new Date().toISOString(),
-    });
+    const readings = result.rows.map((r) => ({ ...r, deviceId }));
+
+    return res.json({ success: true, deviceId, data: readings, count: readings.length, timestamp: new Date().toISOString() });
   } catch (error) {
     console.error('Error getting device history:', error);
-    res.status(500).json({ success: false, message: 'Internal server error', error: error.message });
+    return res.status(500).json({ success: false, message: 'Internal server error', error: error.message });
   }
 };
 
 /**
- * Get all registered devices with status
- * GET /api/devices
- */
-const getAllDevices = async (req, res) => {
-  try {
-    const deviceList = [];
-    const now = new Date();
-
-    for (const [deviceId, registered] of registeredDevices) {
-      const runtime = devices.get(deviceId);
-      const timeSinceLastSeen = runtime ? now - runtime.lastSeen : Infinity;
-      const isConnected = runtime && timeSinceLastSeen < DEVICE_TIMEOUT;
-
-      if (runtime && !isConnected && runtime.status === 'connected') {
-        runtime.status = 'disconnected';
-        devices.set(deviceId, runtime);
-      }
-
-      deviceList.push({
-        deviceId,
-        name: registered.name,
-        status: isConnected ? 'connected' : 'disconnected',
-        lastSeen: runtime ? runtime.lastSeen : null,
-        location: {
-          latitude: runtime ? runtime.latitude : null,
-          longitude: runtime ? runtime.longitude : null,
-        },
-        readings: runtime ? runtime.latestReading || null : null,
-        registeredAt: registered.registeredAt,
-      });
-    }
-
-    res.json({ success: true, data: deviceList, count: deviceList.length, timestamp: new Date().toISOString() });
-  } catch (error) {
-    console.error('Error getting devices:', error);
-    res.status(500).json({ success: false, message: 'Internal server error', error: error.message });
-  }
-};
-
-/**
- * Get specific device details
- * GET /api/devices/:deviceId
- */
-const getDeviceDetails = async (req, res) => {
-  try {
-    const { deviceId } = req.params;
-    const registered = registeredDevices.get(deviceId);
-
-    if (!registered) {
-      return res.status(404).json({ success: false, message: `Device not found: ${deviceId}` });
-    }
-
-    const runtime = devices.get(deviceId);
-    const now = new Date();
-    const timeSinceLastSeen = runtime ? now - runtime.lastSeen : Infinity;
-    const isConnected = runtime && timeSinceLastSeen < DEVICE_TIMEOUT;
-
-    res.json({
-      success: true,
-      data: {
-        deviceId,
-        name: registered.name,
-        status: isConnected ? 'connected' : 'disconnected',
-        lastSeen: runtime ? runtime.lastSeen : null,
-        latitude: runtime ? runtime.latitude : null,
-        longitude: runtime ? runtime.longitude : null,
-        latestReading: runtime ? runtime.latestReading : null,
-        registeredAt: registered.registeredAt,
-      },
-      timestamp: new Date().toISOString(),
-    });
-  } catch (error) {
-    console.error('Error getting device details:', error);
-    res.status(500).json({ success: false, message: 'Internal server error', error: error.message });
-  }
-};
-
-/**
- * Get active alerts
- * GET /api/alerts
+ * Get active alerts for authenticated user's devices
+ * GET /api/alerts  (requires auth)
  */
 const getActiveAlerts = async (req, res) => {
   try {
-    const activeAlerts = Array.from(alerts.values())
-      .filter((alert) => !alert.resolved)
-      .sort((a, b) => b.timestamp - a.timestamp);
+    const ownerId = req.user.id;
 
-    res.json({ success: true, data: activeAlerts, count: activeAlerts.length, timestamp: new Date().toISOString() });
+    const result = await pool.query(
+      `SELECT a.id, d.device_id AS "deviceId", d.name AS "deviceName",
+              a.parameter, a.alert_type AS type, a.value, a.threshold,
+              a.severity, a.message, a.triggered_at AS timestamp, a.resolved, a.resolved_at
+       FROM active_alerts a
+       JOIN devices d ON d.id = a.device_id
+       WHERE d.owner_id = $1 AND a.resolved = FALSE
+       ORDER BY a.triggered_at DESC`,
+      [ownerId]
+    );
+
+    return res.json({ success: true, data: result.rows, count: result.rows.length, timestamp: new Date().toISOString() });
   } catch (error) {
     console.error('Error getting alerts:', error);
-    res.status(500).json({ success: false, message: 'Internal server error', error: error.message });
+    return res.status(500).json({ success: false, message: 'Internal server error', error: error.message });
   }
 };
 
 /**
- * Clear specific alert
- * DELETE /api/alerts/:alertId
+ * Clear / resolve an alert — must own the device it belongs to
+ * DELETE /api/alerts/:alertId  (requires auth)
  */
 const clearAlert = async (req, res) => {
   try {
     const { alertId } = req.params;
+    const ownerId = req.user.id;
 
-    if (!alerts.has(alertId)) {
+    const found = await pool.query(
+      `SELECT a.id FROM active_alerts a
+       JOIN devices d ON d.id = a.device_id
+       WHERE a.id = $1 AND d.owner_id = $2`,
+      [alertId, ownerId]
+    );
+    if (!found.rows.length) {
       return res.status(404).json({ success: false, message: `Alert not found: ${alertId}` });
     }
 
-    const alert = alerts.get(alertId);
-    alert.resolved = true;
-    alert.resolvedAt = new Date();
-    alerts.set(alertId, alert);
+    await pool.query(
+      'UPDATE active_alerts SET resolved = TRUE, resolved_at = NOW() WHERE id = $1',
+      [alertId]
+    );
 
-    socketService.broadcast('alert-resolved', { alertId });
+    socketService.broadcastToUser(ownerId, 'alert-resolved', { alertId });
 
-    res.json({ success: true, message: 'Alert resolved successfully', timestamp: new Date().toISOString() });
+    return res.json({ success: true, message: 'Alert resolved successfully', timestamp: new Date().toISOString() });
   } catch (error) {
     console.error('Error clearing alert:', error);
-    res.status(500).json({ success: false, message: 'Internal server error', error: error.message });
+    return res.status(500).json({ success: false, message: 'Internal server error', error: error.message });
   }
 };
 
-function checkThresholds(deviceId, reading) {
+// ─── Threshold helpers ─────────────────────────────────────────────────────
+
+async function checkThresholds(dbDeviceId, deviceId, deviceName, ownerId, reading) {
   const alerts_generated = [];
   const thresholds = validationService.getThresholds();
 
-  if (reading.ph < thresholds.ph.min) {
-    alerts_generated.push(createAlert(deviceId, 'ph', 'low', reading.ph, thresholds.ph.min));
-  } else if (reading.ph > thresholds.ph.max) {
-    alerts_generated.push(createAlert(deviceId, 'ph', 'high', reading.ph, thresholds.ph.max));
-  }
+  const checks = [
+    { param: 'ph',           type: reading.ph < thresholds.ph.min ? 'low' : reading.ph > thresholds.ph.max ? 'high' : null,                   value: reading.ph },
+    { param: 'temperature',  type: reading.temperature < thresholds.temperature.min ? 'low' : reading.temperature > thresholds.temperature.max ? 'high' : null, value: reading.temperature },
+    { param: 'turbidity',    type: reading.turbidity > thresholds.turbidity.max ? 'high' : null,                                               value: reading.turbidity },
+    { param: 'conductivity', type: reading.conductivity < thresholds.conductivity.min ? 'low' : reading.conductivity > thresholds.conductivity.max ? 'high' : null, value: reading.conductivity },
+  ];
 
-  if (reading.temperature < thresholds.temperature.min) {
-    alerts_generated.push(createAlert(deviceId, 'temperature', 'low', reading.temperature, thresholds.temperature.min));
-  } else if (reading.temperature > thresholds.temperature.max) {
-    alerts_generated.push(createAlert(deviceId, 'temperature', 'high', reading.temperature, thresholds.temperature.max));
-  }
+  for (const check of checks) {
+    if (!check.type) continue;
+    const threshold = check.type === 'low' ? thresholds[check.param].min : thresholds[check.param].max;
+    const severity = getAlertSeverity(check.param, check.value, threshold, check.type);
+    const message = getAlertMessage(check.param, check.type, check.value, threshold);
+    const alertId = `alert-${deviceId}-${check.param}-${Date.now()}`;
 
-  if (reading.turbidity > thresholds.turbidity.max) {
-    alerts_generated.push(createAlert(deviceId, 'turbidity', 'high', reading.turbidity, thresholds.turbidity.max));
-  }
+    try {
+      await pool.query(
+        `INSERT INTO active_alerts (id, device_id, parameter, alert_type, value, threshold, severity, message)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        [alertId, dbDeviceId, check.param, check.type, check.value, threshold, severity, message]
+      );
 
-  if (reading.conductivity < thresholds.conductivity.min) {
-    alerts_generated.push(createAlert(deviceId, 'conductivity', 'low', reading.conductivity, thresholds.conductivity.min));
-  } else if (reading.conductivity > thresholds.conductivity.max) {
-    alerts_generated.push(createAlert(deviceId, 'conductivity', 'high', reading.conductivity, thresholds.conductivity.max));
+      const alert = {
+        id: alertId,
+        deviceId,
+        deviceName,
+        parameter: check.param,
+        type: check.type,
+        value: check.value,
+        threshold,
+        severity,
+        message,
+        timestamp: new Date(),
+        resolved: false,
+      };
+
+      socketService.broadcastToUser(ownerId, 'alert', alert);
+      alerts_generated.push(alert);
+    } catch (err) {
+      console.error('Error saving alert:', err.message);
+    }
   }
 
   return alerts_generated;
 }
 
-function createAlert(deviceId, parameter, type, value, threshold) {
-  const alertId = `alert-${deviceId}-${parameter}-${Date.now()}`;
-  const registered = registeredDevices.get(deviceId);
-  const alert = {
-    id: alertId,
-    deviceId,
-    deviceName: registered ? registered.name : deviceId,
-    parameter,
-    type,
-    value,
-    threshold,
-    severity: getAlertSeverity(parameter, value, threshold, type),
-    message: getAlertMessage(parameter, type, value, threshold),
-    timestamp: new Date(),
-    resolved: false,
-  };
-
-  alerts.set(alertId, alert);
-  socketService.broadcast('alert', alert);
-
-  return alert;
-}
-
 function getAlertSeverity(parameter, value, threshold, type) {
   let deviation;
-
   switch (parameter) {
     case 'ph':
     case 'temperature':
@@ -443,7 +481,6 @@ function getAlertSeverity(parameter, value, threshold, type) {
     default:
       deviation = 0.1;
   }
-
   if (deviation > 0.5) return 'critical';
   if (deviation > 0.2) return 'warning';
   return 'info';
@@ -467,19 +504,18 @@ function getAlertMessage(parameter, type, value, threshold) {
       high: `Water conductivity is too high (${value.toFixed(0)} µS/cm). Maximum safe level is ${threshold} µS/cm.`,
     },
   };
-
   return messages[parameter]?.[type] || `Alert: ${parameter} is ${type}`;
 }
 
-setInterval(() => {
-  const now = new Date();
-  const maxAge = 24 * 60 * 60 * 1000;
-  for (const [alertId, alert] of alerts) {
-    if (now - alert.timestamp > maxAge) {
-      alerts.delete(alertId);
-    }
-  }
-}, 60 * 60 * 1000);
+// Periodic cleanup: mark stale devices as disconnected in DB
+setInterval(async () => {
+  try {
+    await pool.query(
+      `UPDATE devices SET status = 'disconnected'
+       WHERE status = 'connected' AND last_seen < NOW() - INTERVAL '${DEVICE_TIMEOUT} milliseconds'`
+    );
+  } catch {}
+}, 60000);
 
 module.exports = {
   registerDevice,

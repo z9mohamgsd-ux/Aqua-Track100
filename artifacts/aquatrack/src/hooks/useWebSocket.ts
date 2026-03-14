@@ -3,6 +3,7 @@ import { io, Socket } from 'socket.io-client';
 import type { ConnectionStatus } from '@/types';
 
 interface UseWebSocketOptions {
+  userId?: number | null;
   onConnect?: () => void;
   onDisconnect?: (reason: string) => void;
   onError?: (error: Error) => void;
@@ -48,6 +49,14 @@ export function useWebSocket(options: UseWebSocketOptions = {}) {
       setIsConnected(true);
       setConnectionStatus({ type: 'websocket', message: 'Connected' });
       reconnectAttemptsRef.current = 0;
+
+      // Join private user room so the server can route events specifically to this user
+      const uid = optionsRef.current.userId;
+      if (uid) {
+        socket.emit('join-user-room', uid);
+        console.log('Joined user room:', uid);
+      }
+
       optionsRef.current.onConnect?.();
     });
 
@@ -93,6 +102,13 @@ export function useWebSocket(options: UseWebSocketOptions = {}) {
 
     socketRef.current = socket;
   }, []);
+
+  // Re-join user room if userId changes after initial connection
+  useEffect(() => {
+    if (isConnected && socketRef.current && options.userId) {
+      socketRef.current.emit('join-user-room', options.userId);
+    }
+  }, [isConnected, options.userId]);
 
   const disconnect = useCallback(() => {
     if (socketRef.current) {
