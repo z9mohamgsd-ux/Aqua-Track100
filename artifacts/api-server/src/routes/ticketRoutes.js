@@ -5,41 +5,92 @@ const { verifyToken, requireRole } = require('../middleware/auth');
 
 router.use(verifyToken);
 
-// GET /api/tickets  — list tickets based on role
+// ── GET /api/tickets ──────────────────────────────────────────────────────────
 router.get('/', async (req, res) => {
   try {
-    const { status, archived } = req.query;
-    let query, params;
-
+    const { status, archived, role_filter, priority, from_date, to_date } = req.query;
     const showArchived = archived === 'true';
-    const statusFilter = showArchived ? ['archived'] : ['open', 'pending_close', 'escalated', 'closed'];
+
+    let rows;
 
     if (req.user.role === 'user') {
-      query = `
-        SELECT t.*, u.email AS user_email,
-               a.email AS assigned_email
-        FROM tickets t
-        JOIN users u ON u.id = t.user_id
-        LEFT JOIN users a ON a.id = t.assigned_to
-        WHERE t.user_id = $1
-          AND t.status = ANY($2::varchar[])
-        ORDER BY t.updated_at DESC
-      `;
-      params = [req.user.id, status ? [status] : statusFilter];
+      // Regular users see only their own tickets
+      const statusFilter = showArchived ? ['archived'] : ['open', 'pending_close', 'escalated', 'closed'];
+      const { rows: r } = await pool.query(
+        `SELECT t.*, u.email AS user_email, a.email AS assigned_email
+         FROM tickets t
+         JOIN users u ON u.id = t.user_id
+         LEFT JOIN users a ON a.id = t.assigned_to
+         WHERE t.user_id = $1
+           AND t.status = ANY($2::varchar[])
+           ${priority && priority !== 'all' ? `AND t.priority = $3` : ''}
+         ORDER BY t.updated_at DESC`,
+        priority && priority !== 'all'
+          ? [req.user.id, status ? [status] : statusFilter, priority]
+          : [req.user.id, status ? [status] : statusFilter]
+      );
+      rows = r;
+    } else if (req.user.role === 'admin') {
+      // Admins see all non-archived tickets (or archived if requested)
+      const statusFilter = showArchived ? ['archived'] : ['open', 'pending_close', 'escalated', 'closed'];
+      const { rows: r } = await pool.query(
+        `SELECT t.*, u.email AS user_email, a.email AS assigned_email
+         FROM tickets t
+         JOIN users u ON u.id = t.user_id
+         LEFT JOIN users a ON a.id = t.assigned_to
+         WHERE t.status = ANY($1::varchar[])
+         ORDER BY t.updated_at DESC`,
+        [status ? [status] : statusFilter]
+      );
+      rows = r;
     } else {
-      query = `
-        SELECT t.*, u.email AS user_email,
-               a.email AS assigned_email
-        FROM tickets t
-        JOIN users u ON u.id = t.user_id
-        LEFT JOIN users a ON a.id = t.assigned_to
-        WHERE t.status = ANY($1::varchar[])
-        ORDER BY t.updated_at DESC
-      `;
-      params = [status ? [status] : statusFilter];
+      // Owner: full access with rich filters
+      const conditions = [];
+      const params = [];
+
+      if (showArchived) {
+        conditions.push(`t.status = 'archived'`);
+      } else {
+        const allowedStatuses = status && status !== 'all'
+          ? [status]
+          : ['open', 'pending_close', 'escalated', 'closed'];
+        params.push(allowedStatuses);
+        conditions.push(`t.status = ANY($${params.length}::varchar[])`);
+      }
+
+      if (role_filter && role_filter !== 'all') {
+        params.push(role_filter);
+        conditions.push(`t.created_by_role = $${params.length}`);
+      }
+
+      if (priority && priority !== 'all') {
+        params.push(priority);
+        conditions.push(`t.priority = $${params.length}`);
+      }
+
+      if (from_date) {
+        params.push(from_date);
+        conditions.push(`t.created_at >= $${params.length}::timestamptz`);
+      }
+
+      if (to_date) {
+        params.push(to_date);
+        conditions.push(`t.created_at <= $${params.length}::timestamptz + interval '1 day'`);
+      }
+
+      const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+      const { rows: r } = await pool.query(
+        `SELECT t.*, u.email AS user_email, u.role AS creator_role, a.email AS assigned_email
+         FROM tickets t
+         JOIN users u ON u.id = t.user_id
+         LEFT JOIN users a ON a.id = t.assigned_to
+         ${where}
+         ORDER BY t.updated_at DESC`,
+        params
+      );
+      rows = r;
     }
 
-    const { rows } = await pool.query(query, params);
     res.json({ success: true, data: rows, count: rows.length });
   } catch (err) {
     console.error(err);
@@ -47,26 +98,28 @@ router.get('/', async (req, res) => {
   }
 });
 
-// POST /api/tickets  — create ticket (any authenticated user)
+// ── POST /api/tickets ─────────────────────────────────────────────────────────
 router.post('/', async (req, res) => {
   try {
-    const { subject, description } = req.body;
-    if (!subject || !description) {
-      return res.status(400).json({ success: false, message: 'Subject and description are required' });
-    }
+    const { subject, description, priority = 'normal' } = req.body;
+    if (!subject || !description) return res.status(400).json({ success: false, message: 'Subject and description are required' });
+
     const cleanSubject = subject.trim();
     const cleanDescription = description.trim();
-    if (cleanSubject.length > 255) {
-      return res.status(400).json({ success: false, message: 'Subject must be 255 characters or fewer' });
-    }
-    if (cleanDescription.length > 10000) {
-      return res.status(400).json({ success: false, message: 'Description must be 10,000 characters or fewer' });
-    }
+    if (cleanSubject.length > 255) return res.status(400).json({ success: false, message: 'Subject must be 255 characters or fewer' });
+    if (cleanDescription.length > 10000) return res.status(400).json({ success: false, message: 'Description must be 10,000 characters or fewer' });
+
+    const validPriorities = ['low', 'normal', 'high', 'urgent'];
+    const cleanPriority = validPriorities.includes(priority) ? priority : 'normal';
+
+    // Determine created_by_role (owner creates as 'admin' category since they manage the system)
+    const createdByRole = req.user.role === 'user' ? 'user' : 'admin';
+
     const { rows } = await pool.query(
-      `INSERT INTO tickets (user_id, subject, description)
-       VALUES ($1, $2, $3)
+      `INSERT INTO tickets (user_id, subject, description, priority, created_by_role)
+       VALUES ($1, $2, $3, $4, $5)
        RETURNING *`,
-      [req.user.id, cleanSubject, cleanDescription]
+      [req.user.id, cleanSubject, cleanDescription, cleanPriority, createdByRole]
     );
     res.status(201).json({ success: true, data: rows[0] });
   } catch (err) {
@@ -75,11 +128,11 @@ router.post('/', async (req, res) => {
   }
 });
 
-// GET /api/tickets/:id
+// ── GET /api/tickets/:id ──────────────────────────────────────────────────────
 router.get('/:id', async (req, res) => {
   try {
     const { rows } = await pool.query(
-      `SELECT t.*, u.email AS user_email, a.email AS assigned_email
+      `SELECT t.*, u.email AS user_email, u.role AS creator_role, a.email AS assigned_email
        FROM tickets t
        JOIN users u ON u.id = t.user_id
        LEFT JOIN users a ON a.id = t.assigned_to
@@ -91,7 +144,6 @@ router.get('/:id', async (req, res) => {
     if (req.user.role === 'user' && ticket.user_id !== req.user.id) {
       return res.status(403).json({ success: false, message: 'Access denied' });
     }
-    // Fetch messages
     const { rows: messages } = await pool.query(
       `SELECT m.*, u.email AS sender_email, u.role AS sender_role
        FROM ticket_messages m
@@ -107,7 +159,7 @@ router.get('/:id', async (req, res) => {
   }
 });
 
-// POST /api/tickets/:id/messages
+// ── POST /api/tickets/:id/messages ───────────────────────────────────────────
 router.post('/:id/messages', async (req, res) => {
   try {
     const { message } = req.body;
@@ -126,13 +178,10 @@ router.post('/:id/messages', async (req, res) => {
     }
 
     const { rows } = await pool.query(
-      `INSERT INTO ticket_messages (ticket_id, sender_id, message)
-       VALUES ($1, $2, $3) RETURNING *`,
+      `INSERT INTO ticket_messages (ticket_id, sender_id, message) VALUES ($1, $2, $3) RETURNING *`,
       [req.params.id, req.user.id, message.trim()]
     );
-
     await pool.query('UPDATE tickets SET updated_at = NOW() WHERE id = $1', [req.params.id]);
-
     res.status(201).json({ success: true, data: rows[0] });
   } catch (err) {
     console.error(err);
@@ -140,7 +189,7 @@ router.post('/:id/messages', async (req, res) => {
   }
 });
 
-// PATCH /api/tickets/:id/propose-close  — Admin/Owner propose closure (open or escalated)
+// ── PATCH /api/tickets/:id/propose-close ─────────────────────────────────────
 router.patch('/:id/propose-close', requireRole('admin', 'owner'), async (req, res) => {
   try {
     const { rows } = await pool.query(
@@ -158,7 +207,7 @@ router.patch('/:id/propose-close', requireRole('admin', 'owner'), async (req, re
   }
 });
 
-// PATCH /api/tickets/:id/approve-close  — User approves closure
+// ── PATCH /api/tickets/:id/approve-close ─────────────────────────────────────
 router.patch('/:id/approve-close', requireRole('user'), async (req, res) => {
   try {
     const { rows: ticketRows } = await pool.query('SELECT * FROM tickets WHERE id = $1', [req.params.id]);
@@ -178,7 +227,7 @@ router.patch('/:id/approve-close', requireRole('user'), async (req, res) => {
   }
 });
 
-// PATCH /api/tickets/:id/reject-close  — User rejects closure
+// ── PATCH /api/tickets/:id/reject-close ──────────────────────────────────────
 router.patch('/:id/reject-close', requireRole('user'), async (req, res) => {
   try {
     const { rows: ticketRows } = await pool.query('SELECT * FROM tickets WHERE id = $1', [req.params.id]);
@@ -198,7 +247,7 @@ router.patch('/:id/reject-close', requireRole('user'), async (req, res) => {
   }
 });
 
-// PATCH /api/tickets/:id/escalate  — Admin escalates to Owner
+// ── PATCH /api/tickets/:id/escalate ──────────────────────────────────────────
 router.patch('/:id/escalate', requireRole('admin', 'owner'), async (req, res) => {
   try {
     const { rows } = await pool.query(
@@ -214,7 +263,25 @@ router.patch('/:id/escalate', requireRole('admin', 'owner'), async (req, res) =>
   }
 });
 
-// PATCH /api/tickets/:id/archive  — Owner archives a closed ticket manually
+// ── PATCH /api/tickets/:id/priority ──────────────────────────────────────────
+router.patch('/:id/priority', requireRole('admin', 'owner'), async (req, res) => {
+  try {
+    const { priority } = req.body;
+    const valid = ['low', 'normal', 'high', 'urgent'];
+    if (!valid.includes(priority)) return res.status(400).json({ success: false, message: 'Invalid priority' });
+    const { rows } = await pool.query(
+      `UPDATE tickets SET priority = $1, updated_at = NOW() WHERE id = $2 RETURNING *`,
+      [priority, req.params.id]
+    );
+    if (!rows.length) return res.status(404).json({ success: false, message: 'Ticket not found' });
+    res.json({ success: true, data: rows[0] });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+});
+
+// ── PATCH /api/tickets/:id/archive ───────────────────────────────────────────
 router.patch('/:id/archive', requireRole('owner'), async (req, res) => {
   try {
     const { rows } = await pool.query(
@@ -229,7 +296,7 @@ router.patch('/:id/archive', requireRole('owner'), async (req, res) => {
   }
 });
 
-// DELETE /api/tickets/:id  — Owner only
+// ── DELETE /api/tickets/:id ───────────────────────────────────────────────────
 router.delete('/:id', requireRole('owner'), async (req, res) => {
   try {
     const { rowCount } = await pool.query('DELETE FROM tickets WHERE id = $1', [req.params.id]);

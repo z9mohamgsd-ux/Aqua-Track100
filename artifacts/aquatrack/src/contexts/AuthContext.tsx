@@ -11,7 +11,8 @@ interface AuthUser {
 interface AuthContextType {
   user: AuthUser | null;
   token: string | null;
-  login: (email: string, password: string) => Promise<void>;
+  login: (email: string, password: string) => Promise<{ requiresVerification: boolean; sessionToken?: string; maskedEmail?: string }>;
+  verifyOtp: (sessionToken: string, code: string) => Promise<void>;
   logout: () => void;
   loading: boolean;
 }
@@ -23,13 +24,40 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   const [token, setToken] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
+  const applyToken = (t: string, u: AuthUser) => {
+    localStorage.setItem('aquatrack_token', t);
+    setToken(t);
+    setUser(u);
+  };
+
+  // Handle Google OAuth callback — token comes back in ?auth_token= URL param
   useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const authToken = params.get('auth_token');
+    const authError = params.get('auth_error');
+
+    if (authToken) {
+      // Clean URL
+      window.history.replaceState({}, '', window.location.pathname);
+      localStorage.setItem('aquatrack_token', authToken);
+      setToken(authToken);
+      // Fetch user profile with the new token
+      fetch('/api/auth/me', { headers: { Authorization: `Bearer ${authToken}` } })
+        .then((r) => r.json())
+        .then((data) => { if (data.success) setUser(data.user); })
+        .catch(() => {})
+        .finally(() => setLoading(false));
+      return;
+    }
+
+    if (authError) {
+      window.history.replaceState({}, '', window.location.pathname);
+    }
+
     const stored = localStorage.getItem('aquatrack_token');
     if (stored) {
       setToken(stored);
-      fetch('/api/auth/me', {
-        headers: { Authorization: `Bearer ${stored}` },
-      })
+      fetch('/api/auth/me', { headers: { Authorization: `Bearer ${stored}` } })
         .then((r) => r.json())
         .then((data) => {
           if (data.success) setUser(data.user);
@@ -56,9 +84,25 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     });
     const data = await res.json();
     if (!data.success) throw new Error(data.message || 'Login failed');
-    localStorage.setItem('aquatrack_token', data.token);
-    setToken(data.token);
-    setUser(data.user);
+
+    if (data.requiresVerification) {
+      return { requiresVerification: true, sessionToken: data.sessionToken, maskedEmail: data.maskedEmail };
+    }
+
+    // Fallback (shouldn't normally happen unless OTP disabled)
+    applyToken(data.token, data.user);
+    return { requiresVerification: false };
+  };
+
+  const verifyOtp = async (sessionToken: string, code: string) => {
+    const res = await fetch('/api/auth/verify-otp', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionToken, code }),
+    });
+    const data = await res.json();
+    if (!data.success) throw new Error(data.message || 'Verification failed');
+    applyToken(data.token, data.user);
   };
 
   const logout = () => {
@@ -67,16 +111,14 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     setUser(null);
   };
 
-  // Global 401 handler — auto-logout when token expires mid-session
+  // Global 401 handler
   useEffect(() => {
     const originalFetch = window.fetch;
     window.fetch = async (...args) => {
       const res = await originalFetch(...args);
       if (res.status === 401) {
         const url = typeof args[0] === 'string' ? args[0] : '';
-        if (!url.includes('/api/auth/login')) {
-          logout();
-        }
+        if (!url.includes('/api/auth/')) logout();
       }
       return res;
     };
@@ -85,7 +127,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   }, []);
 
   return (
-    <AuthContext.Provider value={{ user, token, login, logout, loading }}>
+    <AuthContext.Provider value={{ user, token, login, verifyOtp, logout, loading }}>
       {children}
     </AuthContext.Provider>
   );
