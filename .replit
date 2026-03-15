@@ -33,3 +33,4 @@ channel = "stable-25_05"
 [userenv.shared]
 JWT_SECRET = "aquatrack-jwt-secret-key-2024-xK9mP3qR7nL1vB5w"
 JWT_EXPIRES_IN = "7d"
+FRONTEND_URL = "https://f7948866-d41d-4ad1-bebe-0d86435917ac-00-1vo4806qo6bey.worf.replit.dev"
