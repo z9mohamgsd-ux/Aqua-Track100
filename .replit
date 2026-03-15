@@ -54,4 +54,5 @@ channel = "stable-25_05"
 [userenv.shared]
 JWT_SECRET = "aquatrack-jwt-secret-key-2024-xK9mP3qR7nL1vB5w"
 JWT_EXPIRES_IN = "7d"
-FRONTEND_URL = "https://f7948866-d41d-4ad1-bebe-0d86435917ac-00-1vo4806qo6bey.worf.replit.dev"
+FRONTEND_URL = "https://63c31363-6404-4a0c-8ea7-fc1cc0c7c4c2-00-16xgwr89ddtr6.janeway.replit.dev"
+VITE_GOOGLE_ENABLED = "true"

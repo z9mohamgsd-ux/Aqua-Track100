@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import type { FormEvent } from 'react';
 import { useAuth } from '@/contexts/AuthContext';
 import { useNavigate, Link } from 'react-router-dom';
@@ -16,6 +16,13 @@ function GoogleIcon() {
 
 const GOOGLE_ENABLED = !!import.meta.env.VITE_GOOGLE_ENABLED;
 
+const GOOGLE_ERROR_MESSAGES: Record<string, string> = {
+  google_denied: 'Google sign-in was cancelled.',
+  account_suspended: 'Your account has been suspended.',
+  server_error: 'Something went wrong with Google sign-in. Please try again.',
+  not_configured: 'Google sign-in is not configured yet.',
+};
+
 export default function LoginPage() {
   const { login } = useAuth();
   const navigate = useNavigate();
@@ -25,6 +32,17 @@ export default function LoginPage() {
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const [googleLoading, setGoogleLoading] = useState(false);
+
+  // Pick up any auth_error returned from Google OAuth redirect
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const authError = params.get('auth_error');
+    if (authError) {
+      setError(GOOGLE_ERROR_MESSAGES[authError] ?? 'Sign-in failed. Please try again.');
+      window.history.replaceState({}, '', window.location.pathname);
+    }
+  }, []);
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
@@ -37,6 +55,26 @@ export default function LoginPage() {
       setError(err instanceof Error ? err.message : 'Login failed');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleGoogleSignIn = async () => {
+    setGoogleLoading(true);
+    setError('');
+    try {
+      // Check if Google OAuth is configured before redirecting
+      const res = await fetch('/api/auth/google', { redirect: 'manual' });
+      if (res.status === 503 || res.type === 'opaqueredirect' === false && res.status !== 0) {
+        const data = await res.json().catch(() => ({}));
+        setError(data.message || 'Google sign-in is not configured yet.');
+        setGoogleLoading(false);
+        return;
+      }
+      // Redirect to Google OAuth (browser follows the redirect)
+      window.location.href = '/api/auth/google';
+    } catch {
+      // fetch returns an error on redirect — that means the server IS redirecting to Google, so follow it
+      window.location.href = '/api/auth/google';
     }
   };
 
@@ -59,13 +97,22 @@ export default function LoginPage() {
 
         {GOOGLE_ENABLED && (
           <>
-            <a
-              href="/api/auth/google"
-              className="flex items-center justify-center gap-3 w-full py-2.5 px-4 rounded-lg border border-border bg-background hover:bg-muted text-sm font-medium text-foreground transition"
+            <button
+              type="button"
+              onClick={handleGoogleSignIn}
+              disabled={googleLoading}
+              className="flex items-center justify-center gap-3 w-full py-2.5 px-4 rounded-lg border border-border bg-background hover:bg-muted disabled:opacity-60 text-sm font-medium text-foreground transition"
             >
-              <GoogleIcon />
+              {googleLoading ? (
+                <svg className="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/>
+                </svg>
+              ) : (
+                <GoogleIcon />
+              )}
               Continue with Google
-            </a>
+            </button>
             <div className="relative">
               <div className="absolute inset-0 flex items-center">
                 <div className="w-full border-t border-border" />
@@ -92,9 +139,7 @@ export default function LoginPage() {
             />
           </div>
           <div className="space-y-1">
-            <div className="flex items-center justify-between">
-              <label htmlFor="password" className="text-sm font-medium text-foreground">Password</label>
-            </div>
+            <label htmlFor="password" className="text-sm font-medium text-foreground">Password</label>
             <div className="relative">
               <input
                 id="password"
