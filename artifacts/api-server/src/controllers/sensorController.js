@@ -1,6 +1,6 @@
-const pool = require('../db');
-const validationService = require('../services/validationService');
-const socketService = require('../services/socketService');
+import pool from '../db.js';
+import { validateSensorData, getThresholds } from '../services/validationService.js';
+import { broadcastToUser } from '../services/socketService.js';
 
 // In-memory runtime state: track connection status & last seen without hammering DB
 const runtimeState = new Map(); // deviceId (text) -> { lastSeen, status }
@@ -44,7 +44,7 @@ const registerDevice = async (req, res) => {
     );
 
     const device = result.rows[0];
-    socketService.broadcastToUser(ownerId, 'device-registered', device);
+    broadcastToUser(ownerId, 'device-registered', device);
 
     return res.status(201).json({ success: true, message: 'Device registered successfully', data: device });
   } catch (error) {
@@ -72,7 +72,7 @@ const deleteDevice = async (req, res) => {
 
     await pool.query('DELETE FROM devices WHERE device_id = $1 AND owner_id = $2', [deviceId, ownerId]);
     runtimeState.delete(deviceId);
-    socketService.broadcastToUser(ownerId, 'device-deleted', { deviceId });
+    broadcastToUser(ownerId, 'device-deleted', { deviceId });
 
     return res.json({ success: true, message: 'Device deleted successfully' });
   } catch (error) {
@@ -195,7 +195,7 @@ const receiveSensorData = async (req, res) => {
       });
     }
 
-    const validation = validationService.validateSensorData({
+    const validation = validateSensorData({
       ph: parseFloat(ph),
       temperature: parseFloat(temperature),
       turbidity: parseFloat(turbidity),
@@ -271,7 +271,7 @@ const receiveSensorData = async (req, res) => {
     const alerts_generated = await checkThresholds(dbDevice.id, deviceId, dbDevice.name, dbDevice.owner_id, reading);
 
     // Broadcast only to device owner's socket room
-    socketService.broadcastToUser(dbDevice.owner_id, 'sensor-data', { device: devicePayload, reading, alerts: alerts_generated });
+    broadcastToUser(dbDevice.owner_id, 'sensor-data', { device: devicePayload, reading, alerts: alerts_generated });
 
     return res.status(201).json({
       success: true,
@@ -405,7 +405,7 @@ const clearAlert = async (req, res) => {
       [alertId]
     );
 
-    socketService.broadcastToUser(ownerId, 'alert-resolved', { alertId });
+    broadcastToUser(ownerId, 'alert-resolved', { alertId });
 
     return res.json({ success: true, message: 'Alert resolved successfully', timestamp: new Date().toISOString() });
   } catch (error) {
@@ -418,7 +418,7 @@ const clearAlert = async (req, res) => {
 
 async function checkThresholds(dbDeviceId, deviceId, deviceName, ownerId, reading) {
   const alerts_generated = [];
-  const thresholds = validationService.getThresholds();
+  const thresholds = getThresholds();
 
   const checks = [
     { param: 'ph',           type: reading.ph < thresholds.ph.min ? 'low' : reading.ph > thresholds.ph.max ? 'high' : null,                   value: reading.ph },
@@ -455,7 +455,7 @@ async function checkThresholds(dbDeviceId, deviceId, deviceName, ownerId, readin
         resolved: false,
       };
 
-      socketService.broadcastToUser(ownerId, 'alert', alert);
+      broadcastToUser(ownerId, 'alert', alert);
       alerts_generated.push(alert);
     } catch (err) {
       console.error('Error saving alert:', err.message);
@@ -517,7 +517,7 @@ setInterval(async () => {
   } catch {}
 }, 60000);
 
-module.exports = {
+export {
   registerDevice,
   deleteDevice,
   receiveSensorData,

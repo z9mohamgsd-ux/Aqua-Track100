@@ -1,4 +1,4 @@
-const thresholds = {
+export const thresholds = {
   ph: {
     min: parseFloat(process.env.PH_MIN) || 6.0,
     max: parseFloat(process.env.PH_MAX) || 8.5
@@ -16,7 +16,7 @@ const thresholds = {
   }
 };
 
-const validateSensorData = ({ ph, temperature, turbidity, conductivity }) => {
+export const validateSensorData = ({ ph, temperature, turbidity, conductivity }) => {
   const errors = [];
 
   if (typeof ph !== 'number' || isNaN(ph) || ph < 0 || ph > 14) {
@@ -41,6 +41,4 @@ const validateSensorData = ({ ph, temperature, turbidity, conductivity }) => {
   };
 };
 
-const getThresholds = () => thresholds;
-
-module.exports = { validateSensorData, getThresholds };
+export const getThresholds = () => thresholds;

@@ -21,6 +21,7 @@
     "nodemailer": "^8.0.2",
     "passport": "^0.7.0",
     "passport-google-oauth20": "^2.0.0",
+    "pg": "^8.20.0",
     "socket.io": "^4.8.3"
   },
   "devDependencies": {
@@ -33,6 +34,7 @@
     "@types/nodemailer": "^7.0.11",
     "@types/passport": "^1.0.17",
     "@types/passport-google-oauth20": "^2.0.17",
+    "@types/pg": "^8.18.0",
     "esbuild": "^0.27.3",
     "tsx": "catalog:"
   }

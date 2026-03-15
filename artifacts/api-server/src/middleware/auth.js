@@ -1,7 +1,7 @@
-const jwt = require('jsonwebtoken');
-const pool = require('../db');
+import jwt from 'jsonwebtoken';
+import pool from '../db.js';
 
-const verifyToken = async (req, res, next) => {
+export const verifyToken = async (req, res, next) => {
   const auth = req.headers.authorization;
   if (!auth || !auth.startsWith('Bearer ')) {
     return res.status(401).json({ success: false, message: 'No token provided' });
@@ -24,12 +24,10 @@ const verifyToken = async (req, res, next) => {
   }
 };
 
-const requireRole = (...roles) => (req, res, next) => {
+export const requireRole = (...roles) => (req, res, next) => {
   if (!req.user) return res.status(401).json({ success: false, message: 'Not authenticated' });
   if (!roles.includes(req.user.role)) {
     return res.status(403).json({ success: false, message: 'Insufficient permissions' });
   }
   next();
 };
-
-module.exports = { verifyToken, requireRole };

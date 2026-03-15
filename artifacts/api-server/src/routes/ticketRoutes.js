@@ -1,7 +1,8 @@
-const express = require('express');
-const router = express.Router();
-const pool = require('../db');
-const { verifyToken, requireRole } = require('../middleware/auth');
+import { Router } from 'express';
+import pool from '../db.js';
+import { verifyToken, requireRole } from '../middleware/auth.js';
+
+const router = Router();
 
 router.use(verifyToken);
 
@@ -308,4 +309,4 @@ router.delete('/:id', requireRole('owner'), async (req, res) => {
   }
 });
 
-module.exports = router;
+export default router;

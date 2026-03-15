@@ -1,12 +1,13 @@
-const express = require('express');
-const router = express.Router();
-const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
-const crypto = require('crypto');
-const rateLimit = require('express-rate-limit');
-const pool = require('../db');
-const { verifyToken } = require('../middleware/auth');
-const { sendVerificationCode } = require('../services/emailService');
+import { Router } from 'express';
+import bcrypt from 'bcryptjs';
+import jwt from 'jsonwebtoken';
+import crypto from 'crypto';
+import rateLimit from 'express-rate-limit';
+import pool from '../db.js';
+import { verifyToken } from '../middleware/auth.js';
+import { sendVerificationCode } from '../services/emailService.js';
+
+const router = Router();
 
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -298,4 +299,4 @@ router.get('/me', verifyToken, (req, res) => {
   res.json({ success: true, user: req.user });
 });
 
-module.exports = router;
+export default router;

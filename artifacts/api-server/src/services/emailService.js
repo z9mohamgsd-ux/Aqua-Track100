@@ -1,4 +1,4 @@
-const nodemailer = require('nodemailer');
+import nodemailer from 'nodemailer';
 
 let transporter = null;
 
@@ -15,11 +15,10 @@ function getTransporter() {
     return transporter;
   }
 
-  // No SMTP configured — use console fallback
   return null;
 }
 
-async function sendVerificationCode(email, code) {
+export async function sendVerificationCode(email, code) {
   const t = getTransporter();
 
   const subject = 'AquaTrack — Your Login Verification Code';
@@ -40,7 +39,6 @@ async function sendVerificationCode(email, code) {
   `;
 
   if (!t) {
-    // Development fallback — print to console
     console.log('\n==========================================================');
     console.log(`[EMAIL] To: ${email}`);
     console.log(`[EMAIL] Subject: ${subject}`);
@@ -56,5 +54,3 @@ async function sendVerificationCode(email, code) {
     html,
   });
 }
-
-module.exports = { sendVerificationCode };

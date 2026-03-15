@@ -1,18 +1,13 @@
 import { Router, type IRouter } from "express";
-import healthRouter from "./health";
-import { createRequire } from "module";
-
-const require = createRequire(import.meta.url);
+import healthRouter from "./health.js";
+import sensorRoutes from "./sensorRoutes.js";
+import authRoutes from "./authRoutes.js";
+import ticketRoutes from "./ticketRoutes.js";
+import userRoutes from "./userRoutes.js";
 
 const router: IRouter = Router();
 
 router.use(healthRouter);
-
-const sensorRoutes = require("./sensorRoutes");
-const authRoutes = require("./authRoutes");
-const ticketRoutes = require("./ticketRoutes");
-const userRoutes = require("./userRoutes");
-
 router.use("/", sensorRoutes);
 router.use("/auth", authRoutes);
 router.use("/tickets", ticketRoutes);

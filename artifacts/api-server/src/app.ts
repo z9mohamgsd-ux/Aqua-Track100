@@ -2,10 +2,8 @@ import express, { type Express } from "express";
 import cors from "cors";
 import { createServer } from "http";
 import { Server } from "socket.io";
-import { createRequire } from "module";
-import router from "./routes";
-
-const require = createRequire(import.meta.url);
+import { init as initSocket } from "./services/socketService.js";
+import router from "./routes/index.js";
 
 const app: Express = express();
 app.set("trust proxy", 1);
@@ -19,8 +17,7 @@ const io = new Server(httpServer, {
   cors: { origin: "*", methods: ["GET", "POST", "PATCH", "DELETE"] },
 });
 
-const socketService = require("./services/socketService");
-socketService.init(io);
+initSocket(io);
 
 app.get("/health", (_req, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });
