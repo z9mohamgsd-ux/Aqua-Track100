@@ -1,0 +1,35 @@
+🗄️ Database — Neon PostgreSQL
+Key	Value
+DATABASE_URL	postgresql://neondb_owner:npg_vx3zpYkObB4W@ep-silent-tooth-a5hwvwd1.us-east-2.aws.neon.tech/neondb?sslmode=require
+PGHOST	ep-silent-tooth-a5hwvwd1.us-east-2.aws.neon.tech
+PGDATABASE	neondb
+PGPORT	5432
+PGUSER	neondb_owner
+PGPASSWORD	npg_vx3zpYkObB4W
+Tables already created: users, devices, sensor_readings, active_alerts, tickets, ticket_messages, verification_codes
+
+👤 Owner Account (pre-created)
+Field	Value
+Email	owner@aquatrack.io
+Password	AquaOwner#2025
+Role	owner
+🔐 Auth / JWT
+Key	Value
+JWT_SECRET	aquatrack-jwt-secret-key-2024-xK9mP3qR7nL1vB5w
+JWT_EXPIRES_IN	7d
+🔵 Google OAuth
+Key	Value
+GOOGLE_CLIENT_ID	512507232279-vreo01h8r12hutcjgv7lfh0176kdnne8.apps.googleusercontent.com
+GOOGLE_CLIENT_SECRET	(you set this — check your Google Cloud Console → Credentials)
+Callback/Redirect URI	Needs to be set to your new platform's domain + /api/auth/google/callback
+When you move to Lovable, go back to Google Cloud Console → Credentials → your OAuth client → update the Authorized redirect URI to your new domain.
+
+🌐 Frontend URL
+Key	Value
+FRONTEND_URL	Your deployed app URL (update this when you move platforms)
+VITE_GOOGLE_ENABLED	true
+📋 Quick notes for Lovable
+The backend is Express + Node.js, database is Neon (PostgreSQL)
+Authentication uses JWT tokens stored in localStorage under the key aquatrack_token
+Google OAuth flow: frontend hits /api/auth/google → Google → /api/auth/google/callback → redirects to frontend with ?auth_token=...
+The NEON_DATABASE_URL variable is what the backend reads (it takes priority over DATABASE_URL)
