@@ -1,9 +1,7 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState } from 'react';
 import type { FormEvent } from 'react';
 import { useAuth } from '@/contexts/AuthContext';
 import { useNavigate, Link } from 'react-router-dom';
-
-const GOOGLE_ENABLED = !!import.meta.env.VITE_GOOGLE_ENABLED || true;
 
 function GoogleIcon() {
   return (
@@ -16,45 +14,25 @@ function GoogleIcon() {
   );
 }
 
-type Step = 'credentials' | 'otp';
+const GOOGLE_ENABLED = !!import.meta.env.VITE_GOOGLE_ENABLED;
 
 export default function LoginPage() {
-  const { login, verifyOtp } = useAuth();
+  const { login } = useAuth();
   const navigate = useNavigate();
 
-  const [step, setStep] = useState<Step>('credentials');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [maskedEmail, setMaskedEmail] = useState('');
-  const [sessionToken, setSessionToken] = useState('');
-  const [otp, setOtp] = useState(['', '', '', '', '', '']);
+  const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
-  const [resendCooldown, setResendCooldown] = useState(0);
 
-  const otpRefs = useRef<(HTMLInputElement | null)[]>([]);
-
-  useEffect(() => {
-    if (resendCooldown <= 0) return;
-    const t = setTimeout(() => setResendCooldown((c) => c - 1), 1000);
-    return () => clearTimeout(t);
-  }, [resendCooldown]);
-
-  const handleCredentials = async (e: FormEvent) => {
+  const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
     setError('');
     setLoading(true);
     try {
-      const result = await login(email, password);
-      if (result.requiresVerification) {
-        setSessionToken(result.sessionToken!);
-        setMaskedEmail(result.maskedEmail!);
-        setStep('otp');
-        setResendCooldown(60);
-        setTimeout(() => otpRefs.current[0]?.focus(), 100);
-      } else {
-        navigate('/');
-      }
+      await login(email, password);
+      navigate('/');
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Login failed');
     } finally {
@@ -62,161 +40,21 @@ export default function LoginPage() {
     }
   };
 
-  const handleOtpChange = (index: number, value: string) => {
-    if (!/^\d*$/.test(value)) return;
-    const next = [...otp];
-    next[index] = value.slice(-1);
-    setOtp(next);
-    if (value && index < 5) {
-      otpRefs.current[index + 1]?.focus();
-    }
-    if (next.every((d) => d !== '') && next.join('').length === 6) {
-      handleOtpSubmit(next.join(''));
-    }
-  };
-
-  const handleOtpKeyDown = (index: number, e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Backspace' && !otp[index] && index > 0) {
-      otpRefs.current[index - 1]?.focus();
-    }
-  };
-
-  const handleOtpPaste = (e: React.ClipboardEvent) => {
-    const pasted = e.clipboardData.getData('text').replace(/\D/g, '').slice(0, 6);
-    if (pasted.length === 6) {
-      e.preventDefault();
-      setOtp(pasted.split(''));
-      handleOtpSubmit(pasted);
-    }
-  };
-
-  const handleOtpSubmit = async (code?: string) => {
-    const finalCode = code ?? otp.join('');
-    if (finalCode.length !== 6) return;
-    setError('');
-    setLoading(true);
-    try {
-      await verifyOtp(sessionToken, finalCode);
-      navigate('/');
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Verification failed');
-      setOtp(['', '', '', '', '', '']);
-      setTimeout(() => otpRefs.current[0]?.focus(), 50);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleResend = async () => {
-    if (resendCooldown > 0) return;
-    setError('');
-    setLoading(true);
-    try {
-      const result = await login(email, password);
-      if (result.requiresVerification) {
-        setSessionToken(result.sessionToken!);
-        setResendCooldown(60);
-        setOtp(['', '', '', '', '', '']);
-        setTimeout(() => otpRefs.current[0]?.focus(), 50);
-      }
-    } catch {
-      setError('Failed to resend code. Please go back and try again.');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const logoBlock = (
-    <div className="text-center space-y-1 mb-6">
-      <div className="flex items-center justify-center gap-2 mb-3">
-        <div className="w-9 h-9 rounded-xl bg-blue-500 flex items-center justify-center shadow-sm">
-          <svg viewBox="0 0 24 24" fill="white" className="w-5 h-5">
-            <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5S10.62 6.5 12 6.5s2.5 1.12 2.5 2.5S13.38 11.5 12 11.5z"/>
-          </svg>
-        </div>
-        <span className="text-xl font-bold text-foreground">AquaTrack</span>
-      </div>
-    </div>
-  );
-
-  if (step === 'otp') {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-background px-4">
-        <div className="w-full max-w-sm space-y-6 p-8 rounded-2xl border border-border bg-card shadow-lg">
-          {logoBlock}
-          <div className="text-center">
-            <div className="inline-flex items-center justify-center w-14 h-14 rounded-full bg-blue-50 dark:bg-blue-950/40 mb-4">
-              <svg className="w-7 h-7 text-blue-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
-              </svg>
-            </div>
-            <h1 className="text-xl font-semibold text-foreground">Check your email</h1>
-            <p className="text-sm text-muted-foreground mt-1">
-              We sent a 6-digit code to <span className="font-medium text-foreground">{maskedEmail}</span>
-            </p>
-          </div>
-
-          <div className="flex justify-center gap-2" onPaste={handleOtpPaste}>
-            {otp.map((digit, i) => (
-              <input
-                key={i}
-                ref={(el) => { otpRefs.current[i] = el; }}
-                type="text"
-                inputMode="numeric"
-                maxLength={1}
-                value={digit}
-                onChange={(e) => handleOtpChange(i, e.target.value)}
-                onKeyDown={(e) => handleOtpKeyDown(i, e)}
-                className="w-11 h-12 text-center text-lg font-bold rounded-lg border-2 border-border bg-background text-foreground focus:border-blue-500 focus:outline-none focus:ring-0 transition"
-                autoFocus={i === 0}
-              />
-            ))}
-          </div>
-
-          {error && (
-            <p className="text-sm text-red-500 bg-red-50 dark:bg-red-950/30 px-3 py-2 rounded-lg border border-red-200 dark:border-red-900 text-center">
-              {error}
-            </p>
-          )}
-
-          <button
-            onClick={() => handleOtpSubmit()}
-            disabled={loading || otp.join('').length !== 6}
-            className="w-full py-2.5 rounded-lg bg-blue-500 hover:bg-blue-600 disabled:opacity-50 text-white text-sm font-semibold transition"
-          >
-            {loading ? 'Verifying…' : 'Verify Code'}
-          </button>
-
-          <div className="text-center space-y-1">
-            <p className="text-sm text-muted-foreground">
-              Didn't receive it?{' '}
-              <button
-                onClick={handleResend}
-                disabled={resendCooldown > 0 || loading}
-                className="text-blue-500 hover:underline font-medium disabled:text-muted-foreground disabled:no-underline disabled:cursor-not-allowed"
-              >
-                {resendCooldown > 0 ? `Resend in ${resendCooldown}s` : 'Resend code'}
-              </button>
-            </p>
-            <button
-              onClick={() => { setStep('credentials'); setError(''); setOtp(['', '', '', '', '', '']); }}
-              className="text-sm text-muted-foreground hover:text-foreground transition"
-            >
-              ← Back to login
-            </button>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
   return (
     <div className="min-h-screen flex items-center justify-center bg-background px-4">
       <div className="w-full max-w-sm space-y-5 p-8 rounded-2xl border border-border bg-card shadow-lg">
-        {logoBlock}
-        <div className="text-center -mt-2 mb-2">
+
+        <div className="text-center space-y-1 mb-2">
+          <div className="flex items-center justify-center gap-2 mb-3">
+            <div className="w-9 h-9 rounded-xl bg-blue-500 flex items-center justify-center shadow-sm">
+              <svg viewBox="0 0 24 24" fill="white" className="w-5 h-5">
+                <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5S10.62 6.5 12 6.5s2.5 1.12 2.5 2.5S13.38 11.5 12 11.5z"/>
+              </svg>
+            </div>
+            <span className="text-xl font-bold text-foreground">AquaTrack</span>
+          </div>
           <h1 className="text-2xl font-semibold text-foreground">Welcome back</h1>
-          <p className="text-sm text-muted-foreground mt-0.5">Sign in to your account</p>
+          <p className="text-sm text-muted-foreground">Sign in to your account</p>
         </div>
 
         {GOOGLE_ENABLED && (
@@ -239,44 +77,79 @@ export default function LoginPage() {
           </>
         )}
 
-        <form onSubmit={handleCredentials} className="space-y-4">
+        <form onSubmit={handleSubmit} className="space-y-4">
           <div className="space-y-1">
-            <label className="text-sm font-medium text-foreground">Email</label>
+            <label htmlFor="email" className="text-sm font-medium text-foreground">Email</label>
             <input
+              id="email"
               type="email"
               required
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               autoComplete="email"
-              placeholder="owner@aquatrack.io"
+              placeholder="you@example.com"
               className="w-full px-3 py-2 rounded-lg border border-border bg-background text-foreground text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition"
             />
           </div>
           <div className="space-y-1">
-            <label className="text-sm font-medium text-foreground">Password</label>
-            <input
-              type="password"
-              required
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              autoComplete="current-password"
-              placeholder="••••••••"
-              className="w-full px-3 py-2 rounded-lg border border-border bg-background text-foreground text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition"
-            />
+            <div className="flex items-center justify-between">
+              <label htmlFor="password" className="text-sm font-medium text-foreground">Password</label>
+            </div>
+            <div className="relative">
+              <input
+                id="password"
+                type={showPassword ? 'text' : 'password'}
+                required
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                autoComplete="current-password"
+                placeholder="••••••••"
+                className="w-full px-3 py-2 pr-10 rounded-lg border border-border bg-background text-foreground text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition"
+              />
+              <button
+                type="button"
+                onClick={() => setShowPassword((v) => !v)}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition"
+                tabIndex={-1}
+                aria-label={showPassword ? 'Hide password' : 'Show password'}
+              >
+                {showPassword ? (
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21" />
+                  </svg>
+                ) : (
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                  </svg>
+                )}
+              </button>
+            </div>
           </div>
 
           {error && (
-            <p className="text-sm text-red-500 bg-red-50 dark:bg-red-950/30 px-3 py-2 rounded-lg border border-red-200 dark:border-red-900">
+            <div className="flex items-start gap-2 text-sm text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-950/30 px-3 py-2 rounded-lg border border-red-200 dark:border-red-900">
+              <svg className="w-4 h-4 mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
               {error}
-            </p>
+            </div>
           )}
 
           <button
             type="submit"
             disabled={loading}
-            className="w-full py-2.5 rounded-lg bg-blue-500 hover:bg-blue-600 disabled:opacity-50 text-white text-sm font-semibold transition"
+            className="w-full py-2.5 rounded-lg bg-blue-500 hover:bg-blue-600 active:bg-blue-700 disabled:opacity-50 text-white text-sm font-semibold transition"
           >
-            {loading ? 'Signing in…' : 'Sign in'}
+            {loading ? (
+              <span className="flex items-center justify-center gap-2">
+                <svg className="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/>
+                </svg>
+                Signing in…
+              </span>
+            ) : 'Sign in'}
           </button>
         </form>
 

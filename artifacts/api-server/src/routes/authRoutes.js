@@ -1,11 +1,9 @@
 import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
-import crypto from 'crypto';
 import rateLimit from 'express-rate-limit';
 import pool from '../db.js';
 import { verifyToken } from '../middleware/auth.js';
-import { sendVerificationCode } from '../services/emailService.js';
 
 const router = Router();
 
@@ -17,17 +15,8 @@ const authLimiter = rateLimit({
   message: { success: false, message: 'Too many attempts. Please wait 15 minutes and try again.' },
 });
 
-const otpLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 10,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { success: false, message: 'Too many OTP attempts.' },
-});
-
 const PASSWORD_MIN = 8;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const OTP_EXPIRY_MINUTES = 5;
 
 function validatePassword(password) {
   if (!password || password.length < PASSWORD_MIN) return `Password must be at least ${PASSWORD_MIN} characters`;
@@ -82,7 +71,7 @@ router.post('/register', authLimiter, async (req, res) => {
   }
 });
 
-// ── POST /api/auth/login  (Step 1: validate credentials → send OTP) ──────────
+// ── POST /api/auth/login ─────────────────────────────────────────────────────
 router.post('/login', authLimiter, async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -93,7 +82,7 @@ router.post('/login', authLimiter, async (req, res) => {
       'SELECT id, email, password_hash, role, status FROM users WHERE email = $1 AND provider = $2',
       [cleanEmail, 'local']
     );
-    if (!rows.length) return res.status(401).json({ success: false, message: 'Invalid credentials' });
+    if (!rows.length) return res.status(401).json({ success: false, message: 'Invalid email or password' });
 
     const user = rows[0];
     if (user.status !== 'active') {
@@ -103,87 +92,10 @@ router.post('/login', authLimiter, async (req, res) => {
     const valid = await bcrypt.compare(password, user.password_hash);
     if (!valid) {
       console.log(`[AUTH] Failed login attempt for ${cleanEmail}`);
-      return res.status(401).json({ success: false, message: 'Invalid credentials' });
+      return res.status(401).json({ success: false, message: 'Invalid email or password' });
     }
 
-    // Generate 6-digit OTP
-    const code = String(Math.floor(100000 + Math.random() * 900000));
-    const sessionToken = crypto.randomUUID();
-    const expiresAt = new Date(Date.now() + OTP_EXPIRY_MINUTES * 60 * 1000);
-
-    // Invalidate previous codes for this user
-    await pool.query('UPDATE verification_codes SET used = TRUE WHERE user_id = $1 AND used = FALSE', [user.id]);
-
-    // Store code with a session token (as the code's row identifier)
-    await pool.query(
-      `INSERT INTO verification_codes (user_id, code, expires_at)
-       VALUES ($1, $2, $3)`,
-      [user.id, code, expiresAt]
-    );
-
-    // Store session → user mapping in a signed temporary JWT (no DB needed)
-    const sessionJwt = jwt.sign(
-      { type: 'otp_session', userId: user.id, email: user.email },
-      process.env.JWT_SECRET,
-      { expiresIn: `${OTP_EXPIRY_MINUTES}m` }
-    );
-
-    await sendVerificationCode(user.email, code);
-    console.log(`[AUTH] OTP sent to ${cleanEmail}`);
-
-    res.json({
-      success: true,
-      requiresVerification: true,
-      sessionToken: sessionJwt,
-      maskedEmail: cleanEmail.replace(/(.{2}).+(@.+)/, '$1***$2'),
-    });
-  } catch (err) {
-    console.error('Login error:', err);
-    res.status(500).json({ success: false, message: 'Internal server error' });
-  }
-});
-
-// ── POST /api/auth/verify-otp  (Step 2: validate OTP → issue full JWT) ───────
-router.post('/verify-otp', otpLimiter, async (req, res) => {
-  try {
-    const { sessionToken, code } = req.body;
-    if (!sessionToken || !code) return res.status(400).json({ success: false, message: 'Session token and code are required' });
-
-    // Decode session JWT
-    let session;
-    try {
-      session = jwt.verify(sessionToken, process.env.JWT_SECRET);
-    } catch {
-      return res.status(401).json({ success: false, message: 'Session expired. Please log in again.' });
-    }
-
-    if (session.type !== 'otp_session') {
-      return res.status(400).json({ success: false, message: 'Invalid session' });
-    }
-
-    // Validate code in DB
-    const { rows } = await pool.query(
-      `SELECT id FROM verification_codes
-       WHERE user_id = $1 AND code = $2 AND used = FALSE AND expires_at > NOW()
-       ORDER BY created_at DESC LIMIT 1`,
-      [session.userId, code.trim()]
-    );
-
-    if (!rows.length) {
-      return res.status(401).json({ success: false, message: 'Invalid or expired verification code' });
-    }
-
-    // Mark code used
-    await pool.query('UPDATE verification_codes SET used = TRUE WHERE id = $1', [rows[0].id]);
-
-    // Fetch full user record
-    const { rows: userRows } = await pool.query(
-      'SELECT id, email, role, status FROM users WHERE id = $1',
-      [session.userId]
-    );
-    const user = userRows[0];
-
-    console.log(`[AUTH] OTP verified — login: ${user.email} (role=${user.role})`);
+    console.log(`[AUTH] Login: ${cleanEmail} (role=${user.role})`);
 
     res.json({
       success: true,
@@ -191,7 +103,7 @@ router.post('/verify-otp', otpLimiter, async (req, res) => {
       user: { id: user.id, email: user.email, role: user.role, status: user.status },
     });
   } catch (err) {
-    console.error('Verify OTP error:', err);
+    console.error('Login error:', err);
     res.status(500).json({ success: false, message: 'Internal server error' });
   }
 });
@@ -231,7 +143,6 @@ router.get('/google/callback', async (req, res) => {
     const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
     const callbackUrl = `${req.protocol}://${req.get('host')}/api/auth/google/callback`;
 
-    // Exchange code for tokens
     const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -247,7 +158,6 @@ router.get('/google/callback', async (req, res) => {
     const tokens = await tokenRes.json();
     if (!tokens.access_token) throw new Error('Failed to exchange code for token');
 
-    // Fetch Google user info
     const profileRes = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
       headers: { Authorization: `Bearer ${tokens.access_token}` },
     });
@@ -255,7 +165,6 @@ router.get('/google/callback', async (req, res) => {
 
     if (!profile.id || !profile.email) throw new Error('Failed to get Google profile');
 
-    // Find or create user
     let user;
     const existing = await pool.query(
       'SELECT id, email, role, status FROM users WHERE google_id = $1 OR email = $2',
@@ -264,7 +173,6 @@ router.get('/google/callback', async (req, res) => {
 
     if (existing.rows.length) {
       user = existing.rows[0];
-      // Link google_id if not already linked
       await pool.query(
         'UPDATE users SET google_id = $1, provider = $2 WHERE id = $3',
         [profile.id, 'google', user.id]

@@ -11,8 +11,8 @@ interface AuthUser {
 interface AuthContextType {
   user: AuthUser | null;
   token: string | null;
-  login: (email: string, password: string) => Promise<{ requiresVerification: boolean; sessionToken?: string; maskedEmail?: string }>;
-  verifyOtp: (sessionToken: string, code: string) => Promise<void>;
+  login: (email: string, password: string) => Promise<void>;
+  applyToken: (token: string, user: AuthUser) => void;
   logout: () => void;
   loading: boolean;
 }
@@ -37,11 +37,9 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     const authError = params.get('auth_error');
 
     if (authToken) {
-      // Clean URL
       window.history.replaceState({}, '', window.location.pathname);
       localStorage.setItem('aquatrack_token', authToken);
       setToken(authToken);
-      // Fetch user profile with the new token
       fetch('/api/auth/me', { headers: { Authorization: `Bearer ${authToken}` } })
         .then((r) => r.json())
         .then((data) => { if (data.success) setUser(data.user); })
@@ -84,24 +82,6 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     });
     const data = await res.json();
     if (!data.success) throw new Error(data.message || 'Login failed');
-
-    if (data.requiresVerification) {
-      return { requiresVerification: true, sessionToken: data.sessionToken, maskedEmail: data.maskedEmail };
-    }
-
-    // Fallback (shouldn't normally happen unless OTP disabled)
-    applyToken(data.token, data.user);
-    return { requiresVerification: false };
-  };
-
-  const verifyOtp = async (sessionToken: string, code: string) => {
-    const res = await fetch('/api/auth/verify-otp', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sessionToken, code }),
-    });
-    const data = await res.json();
-    if (!data.success) throw new Error(data.message || 'Verification failed');
     applyToken(data.token, data.user);
   };
 
@@ -127,7 +107,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   }, []);
 
   return (
-    <AuthContext.Provider value={{ user, token, login, verifyOtp, logout, loading }}>
+    <AuthContext.Provider value={{ user, token, login, applyToken, logout, loading }}>
       {children}
     </AuthContext.Provider>
   );
