@@ -108,6 +108,17 @@ router.post('/login', authLimiter, async (req, res) => {
   }
 });
 
+// Build the public-facing base URL (works behind Replit's proxy)
+function getPublicBaseUrl(req) {
+  // REPLIT_DEV_DOMAIN is the actual public hostname injected by Replit
+  const replitDomain = process.env.REPLIT_DEV_DOMAIN || process.env.REPLIT_DOMAINS?.split(',')[0];
+  if (replitDomain) return `https://${replitDomain}`;
+  // Fallback: trust the forwarded host header
+  const host = req.get('x-forwarded-host') || req.get('host');
+  const proto = req.get('x-forwarded-proto') || req.protocol;
+  return `${proto}://${host}`;
+}
+
 // ── GET /api/auth/google ─────────────────────────────────────────────────────
 router.get('/google', (req, res) => {
   const clientId = process.env.GOOGLE_CLIENT_ID;
@@ -115,7 +126,7 @@ router.get('/google', (req, res) => {
     return res.status(503).json({ success: false, message: 'Google Sign-In is not configured' });
   }
 
-  const callbackUrl = `${req.protocol}://${req.get('host')}/api/auth/google/callback`;
+  const callbackUrl = `${getPublicBaseUrl(req)}/api/auth/google/callback`;
   const params = new URLSearchParams({
     client_id: clientId,
     redirect_uri: callbackUrl,
@@ -132,7 +143,7 @@ router.get('/google', (req, res) => {
 router.get('/google/callback', async (req, res) => {
   const { code, error } = req.query;
 
-  const redirectBase = process.env.FRONTEND_URL || `${req.protocol}://${req.get('host')}`;
+  const redirectBase = process.env.FRONTEND_URL || getPublicBaseUrl(req);
 
   if (error || !code) {
     return res.redirect(`${redirectBase}/?auth_error=google_denied`);
@@ -141,7 +152,7 @@ router.get('/google/callback', async (req, res) => {
   try {
     const clientId = process.env.GOOGLE_CLIENT_ID;
     const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
-    const callbackUrl = `${req.protocol}://${req.get('host')}/api/auth/google/callback`;
+    const callbackUrl = `${getPublicBaseUrl(req)}/api/auth/google/callback`;
 
     const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
       method: 'POST',
