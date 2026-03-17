@@ -1,0 +1,3 @@
+FRONTEND_URL = "https://1c54dd16-3cdc-47e6-949e-416154925366-00-251e0rbyvapdw.spock.replit.dev"
+VITE_GOOGLE_ENABLED = "true"
+NEON_DATABASE_URL = "postgresql://neondb_owner:npg_vx3zpYkObB4W@ep-silent-tooth-a5hwvwd1.us-east-2.aws.neon.tech/neondb?sslmode=require"
